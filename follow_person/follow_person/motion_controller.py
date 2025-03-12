@@ -19,6 +19,28 @@ class MotionController:
         self.angle_tolerance = 0.1  # radians
         self.obstacle_memory_time = 2.0  # seconds
         
+        # PIDパラメータ
+        self.linear_pid = {
+            'Kp': 0.5,
+            'Ki': 0.1,
+            'Kd': 0.2,
+            'integral': 0.0,
+            'prev_error': 0.0,
+            'integral_limit': 1.0
+        }
+        
+        self.angular_pid = {
+            'Kp': 2.0,
+            'Ki': 0.1,
+            'Kd': 0.4,
+            'integral': 0.0,
+            'prev_error': 0.0,
+            'integral_limit': 1.0
+        }
+        
+        # タイムスタンプ
+        self.prev_time = self.node.get_clock().now()
+        
         # Obstacle memory
         self.obstacle_points = []
         self.obstacle_timestamps = []
@@ -132,32 +154,81 @@ class MotionController:
         return True
 
     def _compute_linear_speed(self, distance: float) -> float:
-        """Compute linear speed based on distance to target."""
-        # Stop if we're at target distance
+        """PIDによる線形速度の計算"""
+        # 目標距離に到達している場合は停止
         if abs(distance - self.target_following_distance) < self.distance_tolerance:
+            # PID状態をリセット
+            self.linear_pid['integral'] = 0.0
+            self.linear_pid['prev_error'] = 0.0
             return 0.0
             
-        # Error is difference from target distance
+        # 現在時刻とdt（経過時間）の計算
+        current_time = self.node.get_clock().now()
+        dt = (current_time - self.prev_time).nanoseconds / 1e9  # 秒に変換
+        
+        # 誤差計算
         error = distance - self.target_following_distance
         
-        # Scale speed based on error
-        speed = error * 0.5  # Proportional control
+        # 積分項の更新（制限付き）
+        self.linear_pid['integral'] += error * dt
+        self.linear_pid['integral'] = max(
+            -self.linear_pid['integral_limit'],
+            min(self.linear_pid['integral_limit'], self.linear_pid['integral'])
+        )
         
-        # Apply limits
+        # 微分項の計算
+        derivative = (error - self.linear_pid['prev_error']) / dt if dt > 0 else 0.0
+        
+        # PID制御の計算
+        speed = (self.linear_pid['Kp'] * error +
+                self.linear_pid['Ki'] * self.linear_pid['integral'] +
+                self.linear_pid['Kd'] * derivative)
+        
+        # 状態の更新
+        self.linear_pid['prev_error'] = error
+        self.prev_time = current_time
+        
+        # 速度制限の適用
         speed = max(-self.max_linear_speed, min(self.max_linear_speed, speed))
         
         return speed
 
     def _compute_angular_speed(self, angle: float) -> float:
-        """Compute angular speed based on angle to target."""
-        # Stop if we're pointing at target
+        """PIDによる角速度の計算"""
+        # 目標角度に到達している場合は停止
         if abs(angle) < self.angle_tolerance:
+            # PID状態をリセット
+            self.angular_pid['integral'] = 0.0
+            self.angular_pid['prev_error'] = 0.0
             return 0.0
             
-        # Scale speed based on angle
-        speed = angle * 2.0  # Proportional control
+        # 現在時刻とdt（経過時間）の計算
+        current_time = self.node.get_clock().now()
+        dt = (current_time - self.prev_time).nanoseconds / 1e9  # 秒に変換
         
-        # Apply limits
+        # 誤差計算
+        error = angle  # 目標角度は0（ターゲットに正面を向ける）
+        
+        # 積分項の更新（制限付き）
+        self.angular_pid['integral'] += error * dt
+        self.angular_pid['integral'] = max(
+            -self.angular_pid['integral_limit'],
+            min(self.angular_pid['integral_limit'], self.angular_pid['integral'])
+        )
+        
+        # 微分項の計算
+        derivative = (error - self.angular_pid['prev_error']) / dt if dt > 0 else 0.0
+        
+        # PID制御の計算
+        speed = (self.angular_pid['Kp'] * error +
+                self.angular_pid['Ki'] * self.angular_pid['integral'] +
+                self.angular_pid['Kd'] * derivative)
+        
+        # 状態の更新
+        self.angular_pid['prev_error'] = error
+        self.prev_time = current_time
+        
+        # 速度制限の適用
         speed = max(-self.max_angular_speed, min(self.max_angular_speed, speed))
         
         return speed

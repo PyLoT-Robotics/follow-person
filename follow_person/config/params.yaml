@@ -1,5 +1,36 @@
 person_follower:
   ros__parameters:
-    max_linear_speed: 0.5  # meters per second
-    target_distance: 1.2   # meters
-    update_rate: 10.0      # Hz
+    # 基本パラメータ
+    max_linear_speed: 0.5        # meters per second
+    max_angular_speed: 1.0       # radians per second
+    target_distance: 1.2         # meters
+    update_rate: 10.0           # Hz
+    min_obstacle_distance: 0.5   # meters
+    distance_tolerance: 0.1      # meters
+    angle_tolerance: 0.1         # radians
+    
+    # PIDパラメータ - 線形速度制御
+    linear_pid:
+      Kp: 0.5
+      Ki: 0.1
+      Kd: 0.2
+      integral_limit: 1.0
+    
+    # PIDパラメータ - 角速度制御
+    angular_pid:
+      Kp: 2.0
+      Ki: 0.1
+      Kd: 0.4
+      integral_limit: 1.0
+    
+    # 人物検出パラメータ
+    detection:
+      confidence_threshold: 0.5   # YOLO検出の信頼度閾値
+      tracking_radius: 1.0        # meters
+    
+    # カメラパラメータ
+    camera:
+      fx: 525.0  # focal length x
+      fy: 525.0  # focal length y
+      cx: 319.5  # optical center x
+      cy: 239.5  # optical center y
