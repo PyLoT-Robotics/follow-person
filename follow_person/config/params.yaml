@@ -1,0 +1,5 @@
+person_follower:
+  ros__parameters:
+    max_linear_speed: 0.5  # meters per second
+    target_distance: 1.2   # meters
+    update_rate: 10.0      # Hz

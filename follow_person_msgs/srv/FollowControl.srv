@@ -1,0 +1,7 @@
+# Request
+string command  # 'start', 'pause', 'resume', 'stop'
+---
+# Response
+bool success
+string state    # 'TRACKING', 'SEARCHING', 'PAUSED', 'STOPPED'
+string message

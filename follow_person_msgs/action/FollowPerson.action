@@ -1,0 +1,14 @@
+# Goal
+float32 target_distance  # Desired following distance in meters
+float32 max_speed       # Maximum speed in m/s
+---
+# Result
+bool success
+string message
+float32 total_distance_traveled
+---
+# Feedback
+string current_state    # 'TRACKING', 'SEARCHING', 'PAUSED'
+float32 current_distance_to_person
+geometry_msgs/Pose2D person_position
+float32 current_speed
