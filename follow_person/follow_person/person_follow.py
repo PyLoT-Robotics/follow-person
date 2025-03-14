@@ -28,10 +28,10 @@ class FollowPerson(Node):
         self.model = YOLO("yolov8n.pt")
 
         # Camera intrinsic parameters (example hard-coded values, adjust these)
-        self.fx = 600.0
-        self.fy = 600.0
-        self.cx = 320.0
-        self.cy = 240.0
+        self.fx = 645.0
+        self.fy = 643.0
+        self.cx = 640.0
+        self.cy = 360.0
 
         # Control parameters
         self.follow_distance = 1.0  # desired distance in meters to the person
