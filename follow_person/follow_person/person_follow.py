@@ -7,8 +7,6 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from ultralytics.engine.results import Results
-from typing import List
 
 #!/usr/bin/env python3
 
@@ -18,16 +16,17 @@ class FollowPerson(Node):
 
         # Create publishers/subscribers.
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Create subscribers for camera and lidar data.
         self.create_subscription(Image, '/d455/camera/color/image_raw', self.image_callback, 10)
         self.create_subscription(Image, '/d455/camera/depth/image_rect_raw', self.depth_callback, 10)
-        self.create_subscription(LaserScan, '/scan_filltered', self.scan_callback, 10)
+        self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.create_subscription(CameraInfo, '/d455/camera/color/camera_info', self.camera_info_callback, 10)
-
         self.bridge = CvBridge()
         self.latest_color = None
         self.latest_depth = None
         self.obstacle_detected = False
         self.camera_info_received = False
+        self.obstacle_distance = float('inf')
 
         # Load YOLO model (adjust the weight file as needed)
         self.model = YOLO("yolov8n-pose.pt")
@@ -41,8 +40,8 @@ class FollowPerson(Node):
         # Control parameters
         self.follow_distance = 1.0  # desired distance in meters to the person
         self.linear_gain = 0.8
-        self.angular_gain = 1.0
-        self.obstacle_threshold = 0.5  # stop if obstacle within 0.5m
+        self.angular_gain = 1.2
+        self.obstacle_threshold = 2.5  # stop if obstacle within 0.5m
 
         self.create_timer(0.1, self.timer_callback)
 
@@ -80,13 +79,19 @@ class FollowPerson(Node):
         angle_increment = msg.angle_increment
         for i, r in enumerate(msg.ranges):
             angle = angle_min + i * angle_increment
-            if abs(angle) < np.radians(10):  # within +/- 10 degrees
+            if abs(angle) > np.radians(155):  # within +/- 10 degrees
                 if r > msg.range_min and r < msg.range_max:
                     front_ranges.append(r)
-        if front_ranges and min(front_ranges) < self.obstacle_threshold:
-            self.obstacle_detected = True
+        if front_ranges:
+            self.obstacle_distance = min(front_ranges)
+            if self.obstacle_distance < self.obstacle_threshold:
+                self.obstacle_detected = True
+            else:
+                self.obstacle_detected = False
+
         else:
             self.obstacle_detected = False
+            self.obstacle_distance = float('inf')
 
     def timer_callback(self):
         if self.latest_color is None or self.latest_depth is None:
@@ -143,12 +148,20 @@ class FollowPerson(Node):
 
             # If an obstacle is detected, stop forward motion.
             if self.obstacle_detected:
+                self.get_logger().info(f'Obstacle distance: {self.obstacle_distance:.2f}m')
+                slow_down_factor = max(0.0, self.obstacle_distance / self.obstacle_threshold - 0.2)
+                slow_down_factor = min(1.0, slow_down_factor)
                 self.get_logger().info("Obstacle detected. Stopping.")
-                linear_x = 0.0
+                linear_x = linear_x *slow_down_factor
+                self.get_logger().info(f'Slow down factor: {slow_down_factor}')
+
+                if self.obstacle_distance < 0.5:
+                    linear_x = 0.0
 
             self.publish_cmd(linear_x, angular_z)
             self.get_logger().info(f'Linear: {linear_x}, Angular: {angular_z}')
             self.get_logger().info(f'Person detected at ({center_u}, {center_v}), depth: {Z:.2f}m')
+            self.get_logger().info(f'{self.obstacle_detected}')
     
         except StopIteration:
             self.get_logger().warn('No detection results.')
