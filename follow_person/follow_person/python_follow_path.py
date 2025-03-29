@@ -145,7 +145,7 @@ class FollowPerson(Node):
             # Convert image coordinates to camera frame coordinates (assuming pinhole camera model).
             X = (center_u - self.cx) * Z / self.fx   # convert to meters
 
-            if iter % 10 == 0:
+            if self.iter % 10 == 0:
                 self.trajectory.append([X, Z])
             if len(self.trajectory) > self.max_trajectory_points:
                 self.trajectory.pop(0)
@@ -185,7 +185,7 @@ class FollowPerson(Node):
         twist = Twist()
         twist.linear.x = linear_x
         twist.angular.z = angular_z
-        self.cmd_pub.publish(twist)
+        #self.cmd_pub.publish(twist)
 
     def update_trajectory(self, x, z):
         if self.iter % 10 == 0:
@@ -213,10 +213,12 @@ class FollowPerson(Node):
 
     def publish_path(self, path):
         path_msg = Path()
-        path_msg.header.frame_id = 'map'
+        path_msg.header.frame_id = 'base_link'
         path_msg.header.stamp = self.get_clock().now().to_msg()
         for point in path:
             pose = PoseStamped()
+            pose.header.frame_id = 'base_link'
+            pose.header.stamp = self.get_clock().now().to_msg()
             pose.pose.position.x = point[0]
             pose.pose.position.y = point[1]
             path_msg.poses.append(pose)
