@@ -165,8 +165,8 @@ class FollowPerson(Node):
     
         except StopIteration:
             self.get_logger().warn('No detection results.')
-        cv2.imshow('YOLO', annotated_image)
-        cv2.waitKey(1)
+        #cv2.imshow('YOLO', annotated_image)
+        #cv2.waitKey(1)
 
     def publish_cmd(self, linear_x, angular_z):
         twist = Twist()
