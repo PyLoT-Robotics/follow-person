@@ -8,6 +8,10 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+
+#multithread
+import threading
+import queue
 #!/usr/bin/env python3
 
 class FollowPerson(Node):
@@ -28,6 +32,12 @@ class FollowPerson(Node):
         self.camera_info_received = False
         self.obstacle_distance = float('inf')
 
+        # Initialize the track variables
+        self.target_person_id = None
+        self.tracking_lost_counter = 0
+        self.max_tracking_lost = 10  # Number of frames to consider tracking lost
+        self.tracking_interval = 5
+
         # Load YOLO model (adjust the weight file as needed)
         self.model = YOLO("yolov8n-pose.pt")
 
@@ -44,6 +54,8 @@ class FollowPerson(Node):
         self.obstacle_threshold = 2.5  # stop if obstacle within 0.5m
 
         self.create_timer(0.1, self.timer_callback)
+
+        self.debug_image_pub = self.create_publisher(Image, '~/debug_image', 10)
 
     # 新たにカメラ情報コールバックを追加
     def camera_info_callback(self, msg: CameraInfo):
@@ -93,80 +105,160 @@ class FollowPerson(Node):
             self.obstacle_detected = False
             self.obstacle_distance = float('inf')
 
+    # タイマーコールバック
+    # 画像と深度データを使用して人物を追跡
+
     def timer_callback(self):
         if self.latest_color is None or self.latest_depth is None:
             self.get_logger().warn('No image or depth data.')
             return
 
-        # Run YOLO detection on the latest color image.
-        # stream=Trueの場合はジェネレーターが返されるので、forループで処理する
-        results_gen = self.model(self.latest_color, stream=True)
+        # Run YOLO detection with tracking enabled
+        results_gen = self.model.track(self.latest_color, persist=True, classes=[0], stream=True)
         
-        # ジェネレーターから最初の結果を取得
         try:
             result = next(results_gen)
             annotated_image = result.plot()
+
+            if 'annotated_image' in locals():
+                try:
+                    debug_image_msg = self.bridge.cv2_to_imgmsg(annotated_image, encoding='bgr8')
+                    debug_image_msg.header.stamp = self.get_clock().now().to_msg()
+                    self.debug_image_pub.publish(debug_image_msg)
+                except Exception as e:
+                    self.get_logger().error('Failed to publish debug image: ' + str(e))
             
-            person_box = None
-            # Loop through detected objects to find the first person
-            if hasattr(result, 'boxes'):
-                for r in result.boxes:
-                    cls = int(r.cls[0])
+            # 人物を検出できたか確認
+            person_detected = False
+            
+            # 検出した人物の情報を格納するリスト
+            detected_persons = []
+            
+            # 追跡IDが存在するか確認
+            has_tracking_ids = hasattr(result.boxes, 'id') and result.boxes.id is not None
+            
+            if hasattr(result, 'boxes') and len(result.boxes) > 0:
+                for i, box in enumerate(result.boxes):
+                    cls = int(box.cls[0])
                     if cls == 0:  # class 0 = person in COCO
-                        # Get bounding box (x1, y1, x2, y2)
-                        box = r.xyxy[0].cpu().numpy()  # format: [x1, y1, x2, y2]
-                        person_box = box
+                        person_detected = True
+                        
+                        # バウンディングボックスを取得
+                        xyxy = box.xyxy[0].cpu().numpy()  # [x1, y1, x2, y2]
+                        
+                        # 追跡IDを取得（存在する場合）
+                        person_id = int(box.id[0]) if has_tracking_ids else i
+                        
+                        # バウンディングボックスの中心座標を計算
+                        center_u = int((xyxy[0] + xyxy[2]) / 2)
+                        center_v = int((xyxy[1] + xyxy[3]) / 2)
+                        
+                        # 対応する深度値を取得
+                        try:
+                            depth = self.latest_depth[center_v, center_u]/1000.0  # メートルに変換
+                            if np.isnan(depth) or depth <= 0.0:
+                                continue  # 無効な深度値はスキップ
+                        except IndexError:
+                            continue  # 画像の範囲外ならスキップ
+                        
+                        # 人物情報をリストに追加
+                        person_info = {
+                            'id': person_id,
+                            'box': xyxy,
+                            'center': (center_u, center_v),
+                            'depth': depth
+                        }
+                        detected_persons.append(person_info)
+            
+            # 追跡対象が見つからなかった場合のカウンター処理
+            if not person_detected or len(detected_persons) == 0:
+                self.tracking_lost_counter += 1
+                if self.tracking_lost_counter >= self.max_tracking_lost:
+                    # 長時間見つからなければターゲットIDをリセット
+                    self.target_person_id = None
+                    self.get_logger().info('Target lost. Resetting tracking.')
+                
+                # 人物が見つからない場合はロボットを停止
+                self.publish_cmd(0.0, 0.0)
+                return
+            
+            # 検出した人物をソート（距離が近い順）
+            detected_persons.sort(key=lambda p: p['depth'])
+            
+            # ターゲット選択ロジック
+            target_person = None
+            
+            if self.target_person_id is not None:
+                # 既存のターゲットIDを持つ人物を探す
+                for person in detected_persons:
+                    if person['id'] == self.target_person_id:
+                        target_person = person
+                        self.tracking_lost_counter = 0  # カウンターリセット
                         break
             
-            if person_box is None:
-                # No person detected; stop robot.
-                self.publish_cmd(0.0, 0.0)
-                return
+            # ターゲットが見つからないか未設定の場合、最も近い人物を選択
+            if target_person is None:
+                if len(detected_persons) > 0:
+                    target_person = detected_persons[0]  # 最も近い人物
+                    self.target_person_id = target_person['id']
+                    self.tracking_lost_counter = 0
+                    self.get_logger().info(f'New target selected: ID {self.target_person_id}')
             
-            # Calculate the center of the bounding box.
-            x1, y1, x2, y2 = person_box
-            center_u = int((x1 + x2) / 2)
-            center_v = int((y1 + y2) / 2)
-
-            # Get depth value from the corresponding pixel in the depth image.
-            Z = self.latest_depth[center_v, center_u]/1000.0  # convert to meters
-            if np.isnan(Z) or Z <= 0.0:
-                self.get_logger().warn('Invalid depth value.')
+            # ターゲットに対する制御コマンドを計算
+            if target_person:
+                center_u, center_v = target_person['center']
+                Z = target_person['depth']  # メートル単位
+                
+                # バウンディングボックスに矩形を描画（追跡対象は赤色）
+                x1, y1, x2, y2 = map(int, target_person['box'])
+                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                cv2.putText(annotated_image, f"ID: {target_person['id']} ({Z:.2f}m)", 
+                           (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                
+                # カメラ座標系への変換
+                X = (center_u - self.cx) * Z / self.fx
+                
+                # 制御コマンドの計算
+                angular_z = -self.angular_gain * X
+                distance_error = Z - self.follow_distance
+                linear_x = self.linear_gain * distance_error
+                
+                # 障害物検出時の減速処理
+                if self.obstacle_detected:
+                    slow_down_factor = max(0.0, self.obstacle_distance / self.obstacle_threshold - 0.2)
+                    slow_down_factor = min(1.0, slow_down_factor)
+                    linear_x = linear_x * slow_down_factor
+                    
+                    if self.obstacle_distance < 0.5:
+                        linear_x = 0.0
+                
+                # 制御コマンドの発行
+                self.publish_cmd(linear_x, angular_z)
+                
+                # ログ出力
+                self.get_logger().info(f'Following ID: {self.target_person_id}, Depth: {Z:.2f}m')
+                self.get_logger().info(f'Linear: {linear_x:.2f}, Angular: {angular_z:.2f}')
+                
+            else:
+                self.get_logger().warn('No valid target person found.')
                 self.publish_cmd(0.0, 0.0)
-                return
-
-            # Convert image coordinates to camera frame coordinates (assuming pinhole camera model).
-            X = (center_u - self.cx) * Z / self.fx   # convert to meters
-            self.get_logger().info(f'X: {X}, Z: {Z}')
-            # Y = (center_v - self.cy) * Z / self.fy  # not used here (vertical direction)
-
-            # Determine control commands.
-            # The error is the lateral displacement (X) plus the distance error along Z.
-            angular_z = -self.angular_gain * X
-            distance_error = Z - self.follow_distance
-            linear_x = self.linear_gain * distance_error
-
-            # If an obstacle is detected, stop forward motion.
-            if self.obstacle_detected:
-                self.get_logger().info(f'Obstacle distance: {self.obstacle_distance:.2f}m')
-                slow_down_factor = max(0.0, self.obstacle_distance / self.obstacle_threshold - 0.2)
-                slow_down_factor = min(1.0, slow_down_factor)
-                self.get_logger().info("Obstacle detected. Stopping.")
-                linear_x = linear_x *slow_down_factor
-                self.get_logger().info(f'Slow down factor: {slow_down_factor}')
-
-                if self.obstacle_distance < 0.5:
-                    linear_x = 0.0
-
-            self.publish_cmd(linear_x, angular_z)
-            self.get_logger().info(f'Linear: {linear_x}, Angular: {angular_z}')
-            self.get_logger().info(f'Person detected at ({center_u}, {center_v}), depth: {Z:.2f}m')
-            self.get_logger().info(f'{self.obstacle_detected}')
-    
+            # 画像表示（デバッグ用）
+            # cv2.imshow('Person Tracking', annotated_image)
+            # key = cv2.waitKey(1)
+            # if key==27:
+            #     self.get_logger().info('ESC key pressed, exiting...')
+            #     cv2.destroyAllWindows()
+            #     rclpy.shutdown( )
+            
         except StopIteration:
             self.get_logger().warn('No detection results.')
-        #cv2.imshow('YOLO', annotated_image)
-        #cv2.waitKey(1)
+            self.tracking_lost_counter += 1
+            if self.tracking_lost_counter >= self.max_tracking_lost:
+                self.target_person_id = None
+            self.publish_cmd(0.0, 0.0)
+        except Exception as e:
+            self.get_logger().error(f'Error in timer callback: {str(e)}')
+            self.publish_cmd(0.0, 0.0)
 
     def publish_cmd(self, linear_x, angular_z):
         twist = Twist()
