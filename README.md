@@ -1,126 +1,155 @@
-# Follow Person Package
+# Follow Person
 
-A ROS2 package for person following functionality using Realsense depth camera and 2D Lidar data, with obstacle avoidance capabilities.
+Experimental ROS 2 person-following scripts using RealSense RGB-D images,
+YOLOv8 pose detection, and (in the obstacle-avoidance variant) 2D LiDAR and odometry.
+Developed by PyLoT Robotics for RoboCup@Home. Target environment: Ubuntu 22.04,
+ROS 2 Humble, Python 3.10, and an OpenCV desktop display.
 
-## Features
+## Current implementation status
 
-- Person detection using Realsense depth camera (primary) and 2D Lidar (auxiliary)
-- Obstacle avoidance using fused sensor data
-- Action and Service interfaces for control
-- Configurable parameters for following behavior
-- No pre-existing map requirement
-- Can be called from other programs
+This repository contains research scripts, not a complete service/action-based
+package. The earlier README described interfaces that are not implemented by the
+available follower scripts.
 
-## Requirements
+| Component | Status |
+|---|---|
+| `person_follow_obstable_detect.py` | Standalone experimental RGB-D / LiDAR / odometry follower; spelling is the actual filename |
+| `person_follow.py` | Contains unresolved merge-conflict markers and imports external `pylot_msgs`; do not use as the quick start |
+| `ros2 run follow_person person_follower` / bundled launch | Entry point refers to missing `follow_person.person_follower`; currently unavailable |
+| `follow_person_msgs` | Service/action definitions exist, but no corresponding server is implemented by the documented script |
+| `config/params.yaml` | Not loaded by the standalone script; its control values are defined in source |
 
-- ROS2 Humble
-- Realsense camera
-- 2D Lidar
-- Python 3.8+
-- Required ROS2 packages:
-  - geometry_msgs
-  - sensor_msgs
-  - tf2_ros
-  - rclpy
+The instructions below exercise the standalone obstacle-avoidance script with
+velocity output redirected to a debug topic. This documentation update does not
+repair the package entry point or validate physical following behavior.
 
 ## Installation
 
-```bash
-# Clone the repository into your ROS2 workspace's src directory
-cd ~/ros2_ws/src
-git clone <repository_url> follow-person
+Install ROS 2 Humble and initialize rosdep before these steps.
 
-# Install dependencies
-cd ~/ros2_ws
+```bash
+source /opt/ros/humble/setup.bash
+mkdir -p ~/follow_ws/src
+cd ~/follow_ws/src
+git clone https://github.com/PyLoT-Robotics/follow-person.git
+cd ~/follow_ws
 rosdep install --from-paths src --ignore-src -r -y
-
-# Build the packages
-colcon build --packages-select follow_person_msgs follow_person
+sudo apt install python3-venv python3-pip python3-opencv python3-numpy
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install 'numpy<2' 'ultralytics>=8.0.0' 'torch>=2.0.0' 'opencv-python>=4.5.0,<4.12'
 ```
 
-## Usage
+Use the ROS-compatible system Python rather than Conda so that `rclpy` and
+`cv_bridge` can load. The virtual environment inherits ROS/system packages.
+The NumPy/OpenCV bounds avoid pulling a NumPy 2 build into Humble's binary
+`cv_bridge` environment. These are compatibility bounds, not a tested lockfile.
+The documented standalone script does not need `colcon build` or the custom
+service/action messages. Build those separately only if developing their servers.
 
-### Launch the Person Following Node
+## Prepare perception inputs
+
+The follower runs YOLO internally; no separate person-detector node is required.
+It loads `yolov8n-pose.pt` relative to the working directory. The repository
+contains that file in `follow_person/follow_person/`; run from there as below.
+Ultralytics may fetch additional tracking assets on first use. Model weights and
+Ultralytics have their own licensing terms.
+
+Start your camera, LiDAR and odometry publishers separately. They are not launched
+by this repository. Match or remap these inputs:
+
+| Input topic | ROS type | Expected content |
+|---|---|---|
+| `/d455/camera/color/image_raw` | `sensor_msgs/msg/Image` | Color image convertible to BGR8 |
+| `/d455/camera/depth/image_rect_raw` | `sensor_msgs/msg/Image` | Depth converted by cv_bridge to 32FC1; code divides values by 1000 |
+| `/d455/camera/color/camera_info` | `sensor_msgs/msg/CameraInfo` | Color-camera intrinsics |
+| `/scan_filtered` | `sensor_msgs/msg/LaserScan` | Filtered 2D LiDAR scan |
+| `/odometry/filtered` | `nav_msgs/msg/Odometry` | Base odometry for accumulated obstacle mapping |
+
+Depth must correspond pixel-for-pixel to color: the script samples depth at color
+image coordinates and does not align images itself. Check units explicitly:
+it assumes millimeter-valued depth before division by 1000. A 32FC1 stream already
+in meters needs a unit-conversion change; changing encoding alone does not fix
+units. Camera principal-point defaults and LiDAR offsets also live in source.
+
+For example, inspect the actual topics before choosing camera remaps:
 
 ```bash
-# Using default parameters
-ros2 launch follow_person person_follower.launch.py
-
-# With custom parameters
-ros2 launch follow_person person_follower.launch.py \
-    max_linear_speed:=0.6 \
-    target_distance:=1.5 \
-    update_rate:=15.0
+ros2 topic list -t
+ros2 topic hz /d455/camera/color/image_raw
+ros2 topic hz /d455/camera/depth/image_rect_raw
+ros2 topic echo /d455/camera/color/camera_info --once
+ros2 topic hz /scan_filtered
+ros2 topic hz /odometry/filtered
 ```
 
-### Using the Service Interface
+## Run and inspect output
 
-The service interface provides quick commands for controlling the following behavior:
+In a sourced terminal with the virtual environment active:
 
 ```bash
-# Start following
-ros2 service call /follow_control follow_person_msgs/srv/FollowControl "{command: 'start'}"
-
-# Pause following
-ros2 service call /follow_control follow_person_msgs/srv/FollowControl "{command: 'pause'}"
-
-# Resume following
-ros2 service call /follow_control follow_person_msgs/srv/FollowControl "{command: 'resume'}"
-
-# Stop following
-ros2 service call /follow_control follow_person_msgs/srv/FollowControl "{command: 'stop'}"
+cd ~/follow_ws/src/follow-person/follow_person/follow_person
+python person_follow_obstable_detect.py --ros-args \
+  -r /cmd_vel:=/follow_person/debug_cmd_vel
 ```
 
-### Using the Action Interface
+Adapt input names with ROS remapping, for example:
 
-The action interface provides continuous feedback and more control over the following behavior:
-
-```python
-# Example Python code
-from follow_person_msgs.action import FollowPerson
-import rclpy
-from rclpy.action import ActionClient
-
-# Create action client
-node = rclpy.create_node('follow_client')
-action_client = ActionClient(node, FollowPerson, 'follow_person')
-
-# Send goal
-goal_msg = FollowPerson.Goal()
-goal_msg.target_distance = 1.2
-goal_msg.max_speed = 0.5
-action_client.send_goal_async(goal_msg)
+```bash
+python person_follow_obstable_detect.py --ros-args \
+  -r /cmd_vel:=/follow_person/debug_cmd_vel \
+  -r /scan_filtered:=/scan \
+  -r /d455/camera/color/image_raw:=/camera/camera/color/image_raw \
+  -r /d455/camera/depth/image_rect_raw:=/camera/camera/aligned_depth_to_color/image_raw \
+  -r /d455/camera/color/camera_info:=/camera/camera/color/camera_info
 ```
 
-For a complete example of using both interfaces, see the [example client script](follow_person/examples/follow_person_client.py).
+The camera topic names above are examples: inspect your own driver's output and
+verify depth encoding/units before using them. OpenCV windows require a desktop.
 
-## Parameters
+In another sourced terminal:
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| max_linear_speed | float | 0.5 | Maximum linear speed (m/s) |
-| target_distance | float | 1.2 | Target following distance (m) |
-| update_rate | float | 10.0 | Control loop update rate (Hz) |
+```bash
+ros2 node info /follow_person_obstacle_avoid_node
+ros2 topic echo /follow_person/debug_cmd_vel
+ros2 topic echo /laser_map --once
+```
 
-## Nodes
+Check that camera frames arrive, detections appear in the OpenCV window, the
+local obstacle map updates, and debug velocity responds to a person moving.
+No detections should produce zero velocity. Stop with Ctrl+C. This is an
+inspection procedure, not a claim of completed hardware validation.
 
-### person_follower
+## Connecting a mobile base
 
-Main node providing person following functionality.
+The script publishes `geometry_msgs/msg/Twist` to `/cmd_vel` without an explicit
+start service; removing the debug remap enables that output immediately. Review
+the source control gains and bounds for your base first, verify depth geometry,
+and use your robot's velocity limiter/watchdog and physical stop mechanism.
+Do not rely on the unimplemented `max_linear_speed` launch argument or the
+`/follow_control` service to constrain/stop this script.
 
-#### Subscribed Topics
-- `/camera/depth/color/points` (sensor_msgs/PointCloud2)
-- `/scan` (sensor_msgs/LaserScan)
+## Configuration and outputs
 
-#### Published Topics
-- `/cmd_vel` (geometry_msgs/Twist)
+The standalone class is `FollowPersonWithObstacleAvoidance`. Its source defaults
+include `follow_distance=1.0` m, `linear_gain=0.8`, `angular_gain=1.0`,
+`obstacle_threshold=1.5` m and a 0.1 s timer. Edit source to change these values;
+they are not declared ROS parameters.
 
-#### Services
-- `/follow_control` (follow_person_msgs/srv/FollowControl)
+| Output | Type | Purpose |
+|---|---|---|
+| `/cmd_vel` (remap in quick start) | `geometry_msgs/msg/Twist` | Following commands |
+| `/laser_map` | `nav_msgs/msg/OccupancyGrid` | Local obstacle-map visualization |
 
-#### Actions
-- `/follow_person` (follow_person_msgs/action/FollowPerson)
+## Known limitations / next steps
+
+- Repair the missing entry point and merge conflicts before advertising a package launch.
+- Implement service/action servers before documenting start/pause/resume controls.
+- Parameterize camera geometry, depth units, gains and velocity limits.
+- Add reproducible sensor-bag tests and hardware performance measurements.
+- Image/depth synchronization and robust target selection need further validation.
 
 ## License
 
-Apache License 2.0
+[Apache-2.0](LICENSE) for repository code. Third-party dependencies and model
+weights retain their own licenses.
